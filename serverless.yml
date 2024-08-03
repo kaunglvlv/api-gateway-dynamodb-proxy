@@ -1,0 +1,532 @@
+service: api-gateway-proxy-dynamodb
+
+custom:
+  stage: ${opt:stage, self:provider.stage}
+  tableName: ${self:custom.stage}-api-gateway-proxy-dynamodb
+
+provider:
+  name: aws
+  region: us-west-2
+  stage: dev
+  apiGateway:
+    restApiId: !Ref ApiGateway
+    restApiRootResourceId: !GetAtt ApiGateway.RootResourceId
+  architecture: arm64
+  versionFunctions: false
+  runtime: nodejs20.x
+
+resources:
+  Description: Example of API Gateway proxy integration to DynamoDB
+
+  Resources:
+    ##
+    # DynamoDB
+    ##
+
+    DynamoDb:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.tableName}
+        AttributeDefinitions:
+          - AttributeName: pk
+            AttributeType: S
+          - AttributeName: sk
+            AttributeType: S
+        BillingMode: PAY_PER_REQUEST
+        KeySchema:
+          - AttributeName: pk
+            KeyType: HASH
+          - AttributeName: sk
+            KeyType: RANGE
+
+    ##
+    # API Gateway
+    ##
+
+    ApiGateway:
+      Type: AWS::ApiGateway::RestApi
+      Properties:
+        Name: ${self:service}-${self:custom.stage}
+        Description: DynamoDB proxy example
+
+    ApiGatewayRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: sts:AssumeRole
+              Principal:
+                Service: apigateway.amazonaws.com
+        Policies:
+          - PolicyName: ${self:service}-${self:custom.stage}-apiGateway-policy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:DeleteItem
+                    - dynamodb:Describe*
+                    - dynamodb:GetItem
+                    - dynamodb:PutItem
+                    - dynamodb:Query
+                    - dynamodb:UpdateItem
+                  Resource:
+                    - !GetAtt DynamoDb.Arn
+
+    GatewayResponse400:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        RestApiId: !Ref ApiGateway
+        StatusCode: '400'
+        ResponseType: BAD_REQUEST_BODY
+        ResponseTemplates:
+          application/json: |
+            {
+              "message": "$context.error.validationErrorString"
+            }
+
+    RequestBodyValidator:
+      Type: AWS::ApiGateway::RequestValidator
+      Properties:
+        RestApiId: !Ref ApiGateway
+        ValidateRequestBody: true
+
+    ##
+    # /todos
+    ##
+
+    TodoResource:
+      Type: AWS::ApiGateway::Resource
+      Properties:
+        RestApiId: !Ref ApiGateway
+        ParentId: !GetAtt ApiGateway.RootResourceId
+        PathPart: todos
+
+    TodoPost:
+      Type: AWS::ApiGateway::Method
+      Properties:
+        RestApiId: !Ref ApiGateway
+        ResourceId: !Ref TodoResource
+        HttpMethod: POST
+        ApiKeyRequired: false
+        AuthorizationType: NONE
+        Integration:
+          Type: AWS
+          Credentials: !GetAtt ApiGatewayRole.Arn
+          IntegrationHttpMethod: POST
+          Uri: arn:aws:apigateway:${aws:region}:dynamodb:action/PutItem
+          PassthroughBehavior: WHEN_NO_TEMPLATES
+          RequestTemplates:
+            application/json: |
+              ## context.RequestTime, split the string for date (dd/MMM/yyyy:HH:mm:ss +-hhmm)
+              #set($all_parts = $context.requestTime.split(':'))
+
+              ## Break out date part into day/month/year
+              #set($date_parts = $all_parts[0].split('/'))
+              #set($day = $date_parts[0])
+              #set($month_name = $date_parts[1])
+              #set($year = $date_parts[2])
+
+              ## Set an array to convert month names to month numbers
+              #set($months = {'Jan':'01', 'Feb':'02', 'Mar':'03', 'Apr':'04', 'May':'05', 'Jun':'06', 'Jul':'07', 'Aug':'08', 'Sep':'09', 'Oct':'10', 'Nov':'11', 'Dec':'12'})
+              #set($month = $months.get($month_name))
+
+              ## Break up the time part into hours/mins/seconds
+              #set($hours = $all_parts[1])
+              #set($minutes = $all_parts[2])
+              #set($seconds = $all_parts[3].split(' ')[0])
+
+              ## Get milliseconds from timestamp (last 3 digits)
+              #set($timestamp = $context.requestTimeEpoch)
+              #set($milliseconds = $timestamp % 1000)
+              #set($time = "${hours}:${minutes}:${seconds}.${milliseconds}")
+
+              ## Update the path to use the new variables
+              #set($isoDate = "${year}-${month}-${day}T${time}Z")
+
+              ## Set ISO-8601 dates on current input and
+              ## override the body to use in response template
+              #set($inputRoot = $input.path('$'))
+              #set($inputRoot.createdAt = "$isoDate")
+              #set($inputRoot.updatedAt = "$isoDate")
+              #set($context.requestOverride.path.body = $input.json('$'))
+
+              {
+                "TableName": "${self:custom.tableName}",
+                "Item": {
+                  "pk": {
+                    "S": "Todo"
+                  },
+                  "sk": {
+                    "S": "Todo#$context.requestId"
+                  },
+                  "id": {
+                    "S": "$context.requestId"
+                  },
+                  "title": {
+                    "S": "$input.path('$.title')"
+                  },
+                  "completed": {
+                    "BOOL": false
+                  },
+                  "updatedAt": {
+                    "S": "$isoDate"
+                  },
+                  "createdAt": {
+                    "S": "$isoDate"
+                  }
+                }
+              }
+          IntegrationResponses:
+            - StatusCode: '201'
+              ResponseTemplates:
+                application/json: |
+                  #set($body = $context.requestOverride.path.body)
+                  #set($obj = $util.parseJson($body))
+                  {
+                    "id": "$context.requestId",
+                    "title": "$obj.title",
+                    "completed": false,
+                    "createdAt": "$obj.createdAt",
+                    "updatedAt": "$obj.updatedAt"
+                  }
+        MethodResponses:
+          - StatusCode: '201'
+        RequestValidatorId: !Ref RequestBodyValidator
+        RequestModels:
+          application/json: !Ref TodoPostModel
+
+    TodoPostModel:
+      Type: AWS::ApiGateway::Model
+      Properties:
+        RestApiId: !Ref ApiGateway
+        ContentType: application/json
+        Description: New todo model
+        Name: TodoPostModel
+        Schema:
+          $schema: https://json-schema.org/draft/2019-09/schema
+          title: TodoPostModel
+          type: object
+          required:
+            - title
+          properties:
+            title:
+              type: string
+              description: Title of the todo item
+              minLength: 1
+
+    TodoGetAll:
+      Type: AWS::ApiGateway::Method
+      Properties:
+        RestApiId: !Ref ApiGateway
+        ResourceId: !Ref TodoResource
+        HttpMethod: GET
+        ApiKeyRequired: false
+        AuthorizationType: NONE
+        RequestParameters:
+          method.request.querystring.limit: false
+          method.request.querystring.nextToken: false
+        Integration:
+          Type: AWS
+          Credentials: !GetAtt ApiGatewayRole.Arn
+          IntegrationHttpMethod: POST
+          Uri: arn:aws:apigateway:${aws:region}:dynamodb:action/Query
+          PassthroughBehavior: WHEN_NO_TEMPLATES
+          RequestParameters:
+            integration.request.querystring.limit: method.request.querystring.limit
+            integration.request.querystring.nextToken: method.request.querystring.nextToken
+          RequestTemplates:
+            application/json: |
+              #set($limit = $input.params('limit'))
+              #set($nextEncoded = $input.params('nextToken'))
+              {
+                "TableName": "${self:custom.tableName}",
+                "KeyConditionExpression": "#pk=:todo and begins_with(#sk, :todo)",
+                "ExpressionAttributeNames": {
+                  "#pk": "pk",
+                  "#sk": "sk"
+                },
+                "ExpressionAttributeValues": {
+                  ":todo": {
+                    "S": "Todo"
+                  }
+                },
+                
+                #if($nextEncoded && $nextEncoded.length() > 0)
+                  "ExclusiveStartKey": $util.base64Decode($util.urlDecode($nextEncoded)),
+                #end
+
+                #if($limit && $limit.length() > 0)
+                  "Limit": $limit
+                #else
+                  "Limit": 5
+                #end
+              }
+          IntegrationResponses:
+            - StatusCode: '200'
+              ResponseTemplates:
+                application/json: |
+                  #set($inputRoot = $input.path('$'))
+                  #set($lastEvaluatedKey = $input.json('$.LastEvaluatedKey'))
+                  {
+                    #if($lastEvaluatedKey && $lastEvaluatedKey.length() > 2)
+                      "nextToken": "$util.urlEncode($util.base64Encode($input.json('$.LastEvaluatedKey')))",
+                    #end
+
+                    "items": [
+                      #foreach($field in $inputRoot.Items) {
+                        "id": "$field.id.S",
+                        "title": "$field.title.S",
+                        "completed": $field.completed.BOOL,
+                        "createdAt": "$field.createdAt.S",
+                        "updatedAt": "$field.updatedAt.S"
+                      }#if($foreach.hasNext), #end
+                      #end
+                    ]
+                  }
+        MethodResponses:
+          - StatusCode: '200'
+
+    ##
+    # /todos/{todoId}
+    ##
+
+    TodoItemResource:
+      Type: AWS::ApiGateway::Resource
+      Properties:
+        RestApiId: !Ref ApiGateway
+        ParentId: !Ref TodoResource
+        PathPart: '{todoId}'
+
+    TodoItemGet:
+      Type: AWS::ApiGateway::Method
+      Properties:
+        RestApiId: !Ref ApiGateway
+        ResourceId: !Ref TodoItemResource
+        HttpMethod: GET
+        ApiKeyRequired: false
+        AuthorizationType: NONE
+        RequestParameters:
+          method.request.path.todoId: true
+        Integration:
+          Type: AWS
+          Credentials: !GetAtt ApiGatewayRole.Arn
+          IntegrationHttpMethod: POST
+          Uri: arn:aws:apigateway:${aws:region}:dynamodb:action/GetItem
+          PassthroughBehavior: WHEN_NO_TEMPLATES
+          RequestParameters:
+            integration.request.path.todoId: method.request.path.todoId
+          RequestTemplates:
+            application/json: |
+              {
+                "TableName": "${self:custom.tableName}",
+                "Key": {
+                  "pk": {
+                    "S": "Todo"
+                  },
+                  "sk": {
+                    "S": "Todo#$input.params('todoId')"
+                  }
+                }
+              }
+          IntegrationResponses:
+            - StatusCode: '200'
+              ResponseTemplates:
+                application/json: |
+                  #set($inputRoot = $input.path('$'))
+                  {
+                    ## DynamoDB will return 200 but with an empty obj
+                    ## if not found.
+
+                    #if($inputRoot.size() > 0)
+                      "id": "$inputRoot.Item.id.S",
+                      "title": "$inputRoot.Item.title.S",
+                      "completed": $inputRoot.Item.completed.BOOL,
+                      "createdAt": "$inputRoot.Item.createdAt.S",
+                      "updatedAt": "$inputRoot.Item.updatedAt.S"
+                    #else
+                      #set($context.responseOverride.status = 404)
+                      "message": "Not found"
+                    #end
+                  }
+        MethodResponses:
+          - StatusCode: '200'
+          - StatusCode: '404'
+
+    TodoItemUpdate:
+      Type: AWS::ApiGateway::Method
+      Properties:
+        RestApiId: !Ref ApiGateway
+        ResourceId: !Ref TodoItemResource
+        HttpMethod: PATCH
+        ApiKeyRequired: false
+        AuthorizationType: NONE
+        RequestParameters:
+          method.request.path.todoId: true
+        Integration:
+          Type: AWS
+          Credentials: !GetAtt ApiGatewayRole.Arn
+          IntegrationHttpMethod: POST
+          Uri: arn:aws:apigateway:${aws:region}:dynamodb:action/UpdateItem
+          PassthroughBehavior: WHEN_NO_TEMPLATES
+          RequestParameters:
+            integration.request.path.todoId: method.request.path.todoId
+          RequestTemplates:
+            application/json: |
+              ## context.RequestTime, split the string for date (dd/MMM/yyyy:HH:mm:ss +-hhmm)
+              #set($all_parts = $context.requestTime.split(':'))
+
+              ## Break out date part into day/month/year
+              #set($date_parts = $all_parts[0].split('/'))
+              #set($day = $date_parts[0])
+              #set($month_name = $date_parts[1])
+              #set($year = $date_parts[2])
+
+              ## Set an array to convert month names to month numbers
+              #set($months = {'Jan':'01', 'Feb':'02', 'Mar':'03', 'Apr':'04', 'May':'05', 'Jun':'06', 'Jul':'07', 'Aug':'08', 'Sep':'09', 'Oct':'10', 'Nov':'11', 'Dec':'12'})
+              #set($month = $months.get($month_name))
+
+              ## Break up the time part into hours/mins/seconds
+              #set($hours = $all_parts[1])
+              #set($minutes = $all_parts[2])
+              #set($seconds = $all_parts[3].split(' ')[0])
+
+              ## Get milliseconds from timestamp (last 3 digits)
+              #set($timestamp = $context.requestTimeEpoch)
+              #set($milliseconds = $timestamp % 1000)
+              #set($time = "${hours}:${minutes}:${seconds}.${milliseconds}")
+
+              ## Update the path to use the new variables
+              #set($isoDate = "${year}-${month}-${day}T${time}Z")
+
+              {
+                "TableName": "${self:custom.tableName}",
+                "Key": {
+                  "pk": {
+                    "S": "Todo"
+                  },
+                  "sk": {
+                    "S": "Todo#$input.params('todoId')"
+                  }
+                },
+                "ConditionExpression": "attribute_exists(pk)",
+                "UpdateExpression": "set #title=:title, #completed=:completed, #updatedAt=:updatedAt",
+                "ExpressionAttributeNames": {
+                  "#title": "title",
+                  "#completed": "completed",
+                  "#updatedAt": "updatedAt"
+                },
+                "ExpressionAttributeValues": {
+                  ":title": {
+                    "S": "$input.path('$.title')"
+                  },
+                  ":completed": {
+                    "BOOL": $input.path('$.completed')
+                  },
+                  ":updatedAt": {
+                    "S": "$isoDate"
+                  }
+                },
+                "ReturnValues": "ALL_NEW"
+              }
+          IntegrationResponses:
+            - StatusCode: '200'
+              ResponseTemplates:
+                application/json: |
+                  #set($inputRoot = $input.path('$'))
+                  {
+                    "id": "$inputRoot.Attributes.id.S",
+                    "title": "$inputRoot.Attributes.title.S",
+                    "completed": $inputRoot.Attributes.completed.BOOL,
+                    "createdAt": "$inputRoot.Attributes.createdAt.S",
+                    "updatedAt": "$inputRoot.Attributes.updatedAt.S"
+                  }
+            - StatusCode: '400'
+              SelectionPattern: 4\d{2}
+              ResponseTemplates:
+                application/json: |
+                  #set($inputRoot = $input.path('$'))
+                  {
+                    #if($inputRoot.message == "The conditional request failed")
+                      #set($context.responseOverride.status = 404)
+                      "message": "Not found"
+                    #else
+                      "message": "$inputRoot.message"
+                    #end
+                  }
+        MethodResponses:
+          - StatusCode: '200'
+          - StatusCode: '400'
+          - StatusCode: '404'
+        RequestValidatorId: !Ref RequestBodyValidator
+        RequestModels:
+          application/json: !Ref TodoItemUpdateModel
+
+    TodoItemUpdateModel:
+      Type: AWS::ApiGateway::Model
+      Properties:
+        RestApiId: !Ref ApiGateway
+        ContentType: application/json
+        Description: Todo model for update
+        Name: TodoUpdateModel
+        Schema:
+          $schema: https://json-schema.org/draft/2019-09/schema
+          title: TodoUpdateModel
+          type: object
+          properties:
+            title:
+              type: string
+              description: Title of the todo item
+              minLength: 1
+            completed:
+              type: boolean
+              description: Is todo completed
+
+    TodoItemDelete:
+      Type: AWS::ApiGateway::Method
+      Properties:
+        RestApiId: !Ref ApiGateway
+        ResourceId: !Ref TodoItemResource
+        HttpMethod: DELETE
+        ApiKeyRequired: false
+        AuthorizationType: NONE
+        RequestParameters:
+          method.request.path.todoId: true
+        Integration:
+          Type: AWS
+          Credentials: !GetAtt ApiGatewayRole.Arn
+          IntegrationHttpMethod: POST
+          Uri: arn:aws:apigateway:${aws:region}:dynamodb:action/DeleteItem
+          PassthroughBehavior: WHEN_NO_TEMPLATES
+          RequestParameters:
+            integration.request.path.todoId: method.request.path.todoId
+          RequestTemplates:
+            application/json: |
+              {
+                "TableName": "${self:custom.tableName}",
+                "Key": {
+                  "pk": {
+                    "S": "Todo"
+                  },
+                  "sk": {
+                    "S": "Todo#$input.params('todoId')"
+                  }
+                }
+              }
+          IntegrationResponses:
+            - StatusCode: '204'
+            - StatusCode: '400'
+              SelectionPattern: 4\d{2}
+        MethodResponses:
+          - StatusCode: '204'
+          - StatusCode: '400'
+
+functions:
+  getExample:
+    handler: ./src/functions/getExample.handler
+    events:
+      - http:
+          path: /example
+          method: GET

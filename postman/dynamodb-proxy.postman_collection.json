@@ -1,0 +1,175 @@
+{
+	"info": {
+		"_postman_id": "a7d5595a-a366-475d-bd8d-c21b5540ec2f",
+		"name": "API Gateway DynamoDB Proxy Service",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "9916477",
+		"_collection_link": "https://galactic-space-862853.postman.co/workspace/PalUSA~908fd021-1487-4d17-9d59-a48926ee639a/collection/9916477-a7d5595a-a366-475d-bd8d-c21b5540ec2f?action=share&source=collection_link&creator=9916477"
+	},
+	"item": [
+		{
+			"name": "Get example",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{BASE_URL}}/example",
+					"host": [
+						"{{BASE_URL}}"
+					],
+					"path": [
+						"example"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Create todo",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"title\": \"{{$randomVerb}} {{$randomProduct}}\"\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{BASE_URL}}/todos",
+					"host": [
+						"{{BASE_URL}}"
+					],
+					"path": [
+						"todos"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Get all todos",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"const json = pm.response.json();",
+							"pm.environment.set('NEXT_TOKEN', json.nextToken || '');"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{BASE_URL}}/todos?limit=5&nextToken={{NEXT_TOKEN}}",
+					"host": [
+						"{{BASE_URL}}"
+					],
+					"path": [
+						"todos"
+					],
+					"query": [
+						{
+							"key": "limit",
+							"value": "5"
+						},
+						{
+							"key": "nextToken",
+							"value": "{{NEXT_TOKEN}}"
+						}
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Get todo item",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{BASE_URL}}/todos?limit&next",
+					"host": [
+						"{{BASE_URL}}"
+					],
+					"path": [
+						"todos"
+					],
+					"query": [
+						{
+							"key": "limit",
+							"value": null
+						},
+						{
+							"key": "next",
+							"value": null
+						}
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Update todo item",
+			"request": {
+				"method": "PATCH",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"title\": \"{{$randomVerb}} {{$randomProduct}}\",\n    \"completed\": true\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{BASE_URL}}/todos/{{TODO_ID}}",
+					"host": [
+						"{{BASE_URL}}"
+					],
+					"path": [
+						"todos",
+						"{{TODO_ID}}"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Delete todo",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{BASE_URL}}/todos?limit&next",
+					"host": [
+						"{{BASE_URL}}"
+					],
+					"path": [
+						"todos"
+					],
+					"query": [
+						{
+							"key": "limit",
+							"value": null
+						},
+						{
+							"key": "next",
+							"value": null
+						}
+					]
+				}
+			},
+			"response": []
+		}
+	]
+}
